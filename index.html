@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VideoConnect - Peer Video Calling</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="32" height="32" rx="8" fill="url(#grad)"/>
+                    <path d="M8 12C8 10.9 8.9 10 10 10H18C19.1 10 20 10.9 20 12V20C20 21.1 19.1 22 18 22H10C8.9 22 8 21.1 8 20V12Z" fill="white"/>
+                    <circle cx="24" cy="18" r="4" fill="url(#grad)"/>
+                    <defs>
+                        <linearGradient id="grad" x1="0" y1="0" x2="32" y2="32">
+                            <stop offset="0%" style="stop-color:#667eea;stop-opacity:1" />
+                            <stop offset="100%" style="stop-color:#764ba2;stop-opacity:1" />
+                        </linearGradient>
+                    </defs>
+                </svg>
+                <h1>VideoConnect</h1>
+            </div>
+            <div class="status-badge">
+                <div class="status-dot" id="statusDot"></div>
+                <span id="statusText">Waiting for connection...</span>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Room ID Section -->
+            <div class="room-section">
+                <div class="room-input-container">
+                    <input 
+                        type="text" 
+                        id="roomId" 
+                        placeholder="Enter or create a room ID" 
+                        class="room-input"
+                        maxlength="20"
+                    >
+                    <button id="joinBtn" class="btn btn-primary">Join Room</button>
+                </div>
+                <p class="room-info">Share this room ID with your friend to connect</p>
+            </div>
+
+            <!-- Video Container -->
+            <div class="video-container">
+                <!-- Local Video -->
+                <div class="video-wrapper local">
+                    <video id="localVideo" autoplay playsinline muted></video>
+                    <div class="video-label">You</div>
+                    <div class="video-controls local-controls">
+                        <button id="toggleVideo" class="control-btn" title="Toggle Camera">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/>
+                            </svg>
+                        </button>
+                        <button id="toggleAudio" class="control-btn" title="Toggle Microphone">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72v2.06h2v-2.06c3.28-.48 6-3.3 6-6.72h-1.7z"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Remote Video -->
+                <div class="video-wrapper remote" id="remoteVideoContainer" style="display: none;">
+                    <video id="remoteVideo" autoplay playsinline></video>
+                    <div class="video-label">Connected User</div>
+                    <div class="video-controls remote-controls">
+                        <button id="endCall" class="control-btn end-call-btn" title="End Call">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Placeholder when no remote connection -->
+                <div class="placeholder" id="placeholder">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path>
+                    </svg>
+                    <p>Waiting for someone to join...</p>
+                </div>
+            </div>
+
+            <!-- Stats Panel -->
+            <div class="stats-panel" id="statsPanel" style="display: none;">
+                <div class="stat-item">
+                    <span class="stat-label">Connection Quality:</span>
+                    <span class="stat-value" id="connectionQuality">Good</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Bytes Sent:</span>
+                    <span class="stat-value" id="bytesSent">0</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Bytes Received:</span>
+                    <span class="stat-value" id="bytesReceived">0</span>
+                </div>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>&copy; 2025 VideoConnect. Secure peer-to-peer video calling.</p>
+        </footer>
+    </div>
+
+    <!-- Loading Spinner -->
+    <div class="loading" id="loadingSpinner">
+        <div class="spinner"></div>
+        <p>Connecting...</p>
+    </div>
+
+    <!-- Firebase SDK -->
+    <script type="module">
+        // Import the functions you need from the SDKs you need
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-app.js";
+        import { getFirestore } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-firestore.js";
+
+        // Your web app's Firebase configuration
+        const firebaseConfig = {
+            apiKey: "AIzaSyDAVC4AQpXIAcQQEOLTruMqg-6Dy0St7mU",
+            authDomain: "vsvideo-e2511.firebaseapp.com",
+            projectId: "vsvideo-e2511",
+            storageBucket: "vsvideo-e2511.firebasestorage.app",
+            messagingSenderId: "726237224056",
+            appId: "1:726237224056:web:154e3ba2a1c9e13dda218d"
+        };
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+
+        // Make db available globally for app.js
+        window.firebaseApp = app;
+        window.firebaseDb = db;
+    </script>
+    <script type="module" src="app.js"></script>
+</body>
+</html>
