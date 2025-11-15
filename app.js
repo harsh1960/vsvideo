@@ -10,7 +10,8 @@ import {
     deleteDoc, 
     getDocs, 
     query, 
-    where 
+    where,
+    orderBy
 } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-firestore.js";
 
 // Get Firebase instances from global scope
@@ -40,7 +41,9 @@ const state = {
     remoteUserId: null,
     unsubscribeOffers: null,
     unsubscribeAnswers: null,
-    unsubscribeCandidates: null
+    unsubscribeCandidates: null,
+    unsubscribeOtherUsers: null,
+    connectionInProgress: false
 };
 
 // ============ DOM ELEMENTS ============
@@ -148,15 +151,17 @@ async function joinRoom() {
 
     state.roomId = roomId;
     state.userId = `user_${Date.now()}`;
+    state.connectionInProgress = false;
 
     showLoading(true);
+    console.log('📝 Joining room:', roomId, 'as user:', state.userId);
 
     try {
         const roomRef = doc(db, 'rooms', roomId);
         const roomSnap = await getDoc(roomRef);
 
         if (!roomSnap.exists()) {
-            // Room doesn't exist, create it
+            // Room doesn't exist, create it (User 1)
             console.log('📝 Creating new room:', roomId);
             state.isInitiator = true;
 
@@ -168,13 +173,24 @@ async function joinRoom() {
             setStatus('Waiting for connection...', false);
             showLoading(false);
             listenForOtherUsers();
+
         } else {
             const roomData = roomSnap.data();
             const users = roomData.users || [];
+            console.log('📊 Room exists with users:', users);
 
-            if (users.length === 1 && users[0] !== state.userId) {
-                // Second user joining
-                console.log('👥 Second user joining, initiating connection');
+            if (users.length === 0) {
+                // Room exists but empty
+                console.log('⏳ Room empty, adding first user');
+                state.isInitiator = true;
+                await updateDoc(roomRef, { users: [state.userId] });
+                setStatus('Waiting for connection...', false);
+                showLoading(false);
+                listenForOtherUsers();
+
+            } else if (users.length === 1 && !users.includes(state.userId)) {
+                // User 2 joining
+                console.log('👥 Second user joining room');
                 state.isInitiator = false;
                 state.remoteUserId = users[0];
 
@@ -183,22 +199,24 @@ async function joinRoom() {
                     users: [...users, state.userId]
                 });
 
-                showLoading(false);
                 setStatus('Connecting...', false);
-                await createPeerConnection();
-            } else if (users.length === 0 || (users.length === 1 && users[0] === state.userId)) {
-                // First user, wait for second
-                console.log('⏳ Waiting for another user...');
+                showLoading(false);
+                
+                // Wait a moment for firestore to sync, then create connection
+                setTimeout(() => {
+                    createPeerConnection();
+                }, 500);
+                
+            } else if (users.includes(state.userId)) {
+                // This user already in room
+                console.log('ℹ️ User already in room, waiting for second user');
                 state.isInitiator = true;
-
-                await updateDoc(roomRef, {
-                    users: [...new Set([...users, state.userId])]
-                });
-
                 setStatus('Waiting for connection...', false);
                 showLoading(false);
                 listenForOtherUsers();
+
             } else {
+                // Room full (2+ users)
                 alert('Room is full! Only 2 people can join.');
                 showLoading(false);
                 return;
@@ -212,51 +230,61 @@ async function joinRoom() {
         console.error('❌ Error joining room:', error);
         alert('Error joining room: ' + error.message);
         showLoading(false);
+        joinBtn.disabled = false;
+        roomIdInput.disabled = false;
     }
 }
 
 // ============ LISTEN FOR OTHER USERS ============
 function listenForOtherUsers() {
+    console.log('👂 Listening for other users...');
     const roomRef = doc(db, 'rooms', state.roomId);
 
     const unsubscribe = onSnapshot(roomRef, async (snapshot) => {
+        if (!snapshot.exists()) {
+            console.log('⚠️ Room deleted');
+            return;
+        }
+
         const roomData = snapshot.data();
+        const users = roomData.users || [];
+        console.log('📊 Users in room:', users);
 
-        if (roomData) {
-            const users = roomData.users || [];
-            const otherUsers = users.filter(uid => uid !== state.userId);
+        const otherUsers = users.filter(uid => uid !== state.userId);
 
-            if (otherUsers.length > 0 && !state.peerConnection && state.isInitiator) {
-                console.log('🔗 Other user detected, initiating connection');
-                state.remoteUserId = otherUsers[0];
-                state.isInitiator = true;
+        // If other user joined and we haven't started connection yet
+        if (otherUsers.length > 0 && !state.peerConnection && !state.connectionInProgress && state.isInitiator) {
+            console.log('🔗 Other user detected, creating peer connection');
+            state.remoteUserId = otherUsers[0];
+            state.connectionInProgress = true;
+            setStatus('Connecting...', false);
+            await createPeerConnection();
+        }
 
-                setStatus('Connecting...', false);
-                await createPeerConnection();
-            } else if (otherUsers.length === 0 && state.peerConnection) {
-                // Remote user disconnected
-                console.log('👋 Remote user disconnected');
-                endCall();
-            }
+        // If other user left
+        if (otherUsers.length === 0 && state.peerConnection) {
+            console.log('👋 Remote user disconnected');
+            endCall();
         }
     });
 
-    // Store unsubscribe function for cleanup
     state.unsubscribeOtherUsers = unsubscribe;
 }
 
 // ============ CREATE PEER CONNECTION ============
 async function createPeerConnection() {
     if (state.peerConnection) {
-        console.log('🔗 Peer connection already exists');
+        console.log('⚠️ Peer connection already exists');
         return;
     }
 
     try {
+        console.log('🔨 Creating RTCPeerConnection...');
         state.peerConnection = new RTCPeerConnection({ iceServers: config.iceServers });
 
         // Add local stream tracks
         state.localStream.getTracks().forEach(track => {
+            console.log('📤 Adding local track:', track.kind);
             state.peerConnection.addTrack(track, state.localStream);
         });
 
@@ -276,7 +304,7 @@ async function createPeerConnection() {
         // Handle ICE candidates
         state.peerConnection.onicecandidate = async (event) => {
             if (event.candidate) {
-                console.log('📤 Sending ICE candidate');
+                console.log('🧊 ICE candidate generated, sending...');
                 try {
                     await addDoc(collection(db, 'rooms', state.roomId, 'candidates'), {
                         from: state.userId,
@@ -286,8 +314,9 @@ async function createPeerConnection() {
                         sdpMid: event.candidate.sdpMid,
                         timestamp: new Date()
                     });
+                    console.log('✅ ICE candidate sent');
                 } catch (error) {
-                    console.error('Error adding ICE candidate:', error);
+                    console.error('❌ Error adding ICE candidate:', error);
                 }
             }
         };
@@ -298,14 +327,20 @@ async function createPeerConnection() {
             if (state.peerConnection.connectionState === 'disconnected' ||
                 state.peerConnection.connectionState === 'failed' ||
                 state.peerConnection.connectionState === 'closed') {
+                console.log('❌ Connection ended');
                 endCall();
             }
         };
 
         if (state.isInitiator) {
             console.log('📝 Creating offer...');
-            const offer = await state.peerConnection.createOffer();
+            const offer = await state.peerConnection.createOffer({
+                offerToReceiveAudio: true,
+                offerToReceiveVideo: true
+            });
+            
             await state.peerConnection.setLocalDescription(offer);
+            console.log('✅ Local description set');
 
             // Send offer to Firestore
             const offerRef = doc(db, 'rooms', state.roomId, 'offers', state.userId);
@@ -317,10 +352,11 @@ async function createPeerConnection() {
                 timestamp: new Date()
             });
 
-            console.log('📤 Offer sent');
+            console.log('📤 Offer sent to Firestore');
             listenForAnswer();
         } else {
             // Listen for offer
+            console.log('👂 Listening for offer...');
             listenForOffer();
         }
 
@@ -329,47 +365,55 @@ async function createPeerConnection() {
 
     } catch (error) {
         console.error('❌ Error creating peer connection:', error);
+        state.connectionInProgress = false;
     }
 }
 
 // ============ LISTEN FOR OFFER ============
 function listenForOffer() {
-    const offersQuery = query(
-        collection(db, 'rooms', state.roomId, 'offers'),
-        where('to', '==', state.userId)
-    );
+    console.log('👂 Listening for offers...');
+    const offersRef = collection(db, 'rooms', state.roomId, 'offers');
 
-    const unsubscribe = onSnapshot(offersQuery, async (snapshot) => {
-        snapshot.docs.forEach(async (doc) => {
-            const offerData = doc.data();
+    const unsubscribe = onSnapshot(offersRef, async (snapshot) => {
+        snapshot.docChanges().forEach(async (change) => {
+            if (change.type === 'added') {
+                const offerData = change.doc.data();
+                console.log('📥 Offer data received:', offerData.from);
 
-            if (offerData && offerData.from !== state.userId && !state.peerConnection.remoteDescription) {
-                try {
-                    console.log('📥 Offer received');
-                    const offer = new RTCSessionDescription({
-                        type: 'offer',
-                        sdp: offerData.sdp
-                    });
+                if (offerData.from === state.remoteUserId && !state.peerConnection.remoteDescription) {
+                    try {
+                        console.log('🎯 Processing offer from:', offerData.from);
+                        const offer = new RTCSessionDescription({
+                            type: 'offer',
+                            sdp: offerData.sdp
+                        });
 
-                    await state.peerConnection.setRemoteDescription(offer);
+                        await state.peerConnection.setRemoteDescription(offer);
+                        console.log('✅ Remote description set (offer)');
 
-                    console.log('📝 Creating answer...');
-                    const answer = await state.peerConnection.createAnswer();
-                    await state.peerConnection.setLocalDescription(answer);
+                        console.log('📝 Creating answer...');
+                        const answer = await state.peerConnection.createAnswer({
+                            offerToReceiveAudio: true,
+                            offerToReceiveVideo: true
+                        });
+                        
+                        await state.peerConnection.setLocalDescription(answer);
+                        console.log('✅ Local description set (answer)');
 
-                    // Send answer to Firestore
-                    const answerRef = doc(db, 'rooms', state.roomId, 'answers', state.userId);
-                    await setDoc(answerRef, {
-                        from: state.userId,
-                        to: offerData.from,
-                        sdp: answer.sdp,
-                        type: 'answer',
-                        timestamp: new Date()
-                    });
+                        // Send answer to Firestore
+                        const answerRef = doc(db, 'rooms', state.roomId, 'answers', state.userId);
+                        await setDoc(answerRef, {
+                            from: state.userId,
+                            to: offerData.from,
+                            sdp: answer.sdp,
+                            type: 'answer',
+                            timestamp: new Date()
+                        });
 
-                    console.log('📤 Answer sent');
-                } catch (error) {
-                    console.error('❌ Error handling offer:', error);
+                        console.log('📤 Answer sent to Firestore');
+                    } catch (error) {
+                        console.error('❌ Error handling offer:', error);
+                    }
                 }
             }
         });
@@ -380,27 +424,28 @@ function listenForOffer() {
 
 // ============ LISTEN FOR ANSWER ============
 function listenForAnswer() {
-    const answersQuery = query(
-        collection(db, 'rooms', state.roomId, 'answers'),
-        where('to', '==', state.userId)
-    );
+    console.log('👂 Listening for answers...');
+    const answersRef = collection(db, 'rooms', state.roomId, 'answers');
 
-    const unsubscribe = onSnapshot(answersQuery, async (snapshot) => {
-        snapshot.docs.forEach(async (doc) => {
-            const answerData = doc.data();
+    const unsubscribe = onSnapshot(answersRef, async (snapshot) => {
+        snapshot.docChanges().forEach(async (change) => {
+            if (change.type === 'added') {
+                const answerData = change.doc.data();
+                console.log('📥 Answer data received:', answerData.from);
 
-            if (answerData && answerData.from !== state.userId && !state.peerConnection.remoteDescription) {
-                try {
-                    console.log('📥 Answer received');
-                    const answer = new RTCSessionDescription({
-                        type: 'answer',
-                        sdp: answerData.sdp
-                    });
+                if (answerData.from === state.remoteUserId && !state.peerConnection.remoteDescription) {
+                    try {
+                        console.log('🎯 Processing answer from:', answerData.from);
+                        const answer = new RTCSessionDescription({
+                            type: 'answer',
+                            sdp: answerData.sdp
+                        });
 
-                    await state.peerConnection.setRemoteDescription(answer);
-                    console.log('✅ Answer set');
-                } catch (error) {
-                    console.error('❌ Error handling answer:', error);
+                        await state.peerConnection.setRemoteDescription(answer);
+                        console.log('✅ Remote description set (answer)');
+                    } catch (error) {
+                        console.error('❌ Error handling answer:', error);
+                    }
                 }
             }
         });
@@ -411,29 +456,30 @@ function listenForAnswer() {
 
 // ============ LISTEN FOR ICE CANDIDATES ============
 function listenForRemoteCandidates() {
-    const candidatesQuery = query(
-        collection(db, 'rooms', state.roomId, 'candidates'),
-        where('from', '==', state.remoteUserId),
-        where('to', '==', state.userId)
-    );
+    console.log('👂 Listening for ICE candidates...');
+    const candidatesRef = collection(db, 'rooms', state.roomId, 'candidates');
 
-    const unsubscribe = onSnapshot(candidatesQuery, async (snapshot) => {
+    const unsubscribe = onSnapshot(candidatesRef, async (snapshot) => {
         snapshot.docChanges().forEach(async (change) => {
             if (change.type === 'added') {
                 const candidateData = change.doc.data();
-                try {
-                    if (state.peerConnection && state.peerConnection.remoteDescription) {
-                        const candidate = new RTCIceCandidate({
-                            candidate: candidateData.candidate,
-                            sdpMLineIndex: candidateData.sdpMLineIndex,
-                            sdpMid: candidateData.sdpMid
-                        });
 
-                        await state.peerConnection.addIceCandidate(candidate);
-                        console.log('📥 ICE candidate added');
+                if (candidateData.from === state.remoteUserId && candidateData.to === state.userId) {
+                    try {
+                        if (state.peerConnection && state.peerConnection.remoteDescription) {
+                            console.log('🧊 Adding ICE candidate');
+                            const candidate = new RTCIceCandidate({
+                                candidate: candidateData.candidate,
+                                sdpMLineIndex: candidateData.sdpMLineIndex,
+                                sdpMid: candidateData.sdpMid
+                            });
+
+                            await state.peerConnection.addIceCandidate(candidate);
+                            console.log('✅ ICE candidate added');
+                        }
+                    } catch (error) {
+                        console.error('❌ Error adding ICE candidate:', error);
                     }
-                } catch (error) {
-                    console.error('❌ Error adding ICE candidate:', error);
                 }
             }
         });
@@ -456,8 +502,9 @@ async function endCall() {
     remoteVideoContainer.style.display = 'none';
     placeholder.style.display = 'flex';
     statsPanel.style.display = 'none';
+    state.connectionInProgress = false;
 
-    // Unsubscribe from listeners
+    // Unsubscribe from all listeners
     if (state.unsubscribeOffers) state.unsubscribeOffers();
     if (state.unsubscribeAnswers) state.unsubscribeAnswers();
     if (state.unsubscribeCandidates) state.unsubscribeCandidates();
@@ -497,7 +544,7 @@ async function endCall() {
             candidatesSnap.forEach(doc => deleteDoc(doc.ref));
 
         } catch (error) {
-            console.error('Error cleaning up database:', error);
+            console.error('❌ Error cleaning up database:', error);
         }
     }
 
