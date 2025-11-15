@@ -8,10 +8,7 @@ import {
     onSnapshot, 
     updateDoc, 
     deleteDoc, 
-    getDocs, 
-    query, 
-    where,
-    orderBy
+    getDocs
 } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-firestore.js";
 
 // Get Firebase instances from global scope
@@ -37,13 +34,12 @@ const state = {
     userId: null,
     isVideoEnabled: true,
     isAudioEnabled: true,
-    isInitiator: false,
     remoteUserId: null,
     unsubscribeOffers: null,
     unsubscribeAnswers: null,
     unsubscribeCandidates: null,
     unsubscribeOtherUsers: null,
-    connectionInProgress: false
+    localDescriptionSet: false
 };
 
 // ============ DOM ELEMENTS ============
@@ -151,7 +147,6 @@ async function joinRoom() {
 
     state.roomId = roomId;
     state.userId = `user_${Date.now()}`;
-    state.connectionInProgress = false;
 
     showLoading(true);
     console.log('📝 Joining room:', roomId, 'as user:', state.userId);
@@ -161,10 +156,8 @@ async function joinRoom() {
         const roomSnap = await getDoc(roomRef);
 
         if (!roomSnap.exists()) {
-            // Room doesn't exist, create it (User 1)
+            // First user - create room
             console.log('📝 Creating new room:', roomId);
-            state.isInitiator = true;
-
             await setDoc(roomRef, {
                 created: new Date(),
                 users: [state.userId]
@@ -172,7 +165,7 @@ async function joinRoom() {
 
             setStatus('Waiting for connection...', false);
             showLoading(false);
-            listenForOtherUsers();
+            listenForSecondUser();
 
         } else {
             const roomData = roomSnap.data();
@@ -180,21 +173,19 @@ async function joinRoom() {
             console.log('📊 Room exists with users:', users);
 
             if (users.length === 0) {
-                // Room exists but empty
-                console.log('⏳ Room empty, adding first user');
-                state.isInitiator = true;
+                // Room empty, add self
+                console.log('⏳ Room empty, adding self');
                 await updateDoc(roomRef, { users: [state.userId] });
                 setStatus('Waiting for connection...', false);
                 showLoading(false);
-                listenForOtherUsers();
+                listenForSecondUser();
 
             } else if (users.length === 1 && !users.includes(state.userId)) {
-                // User 2 joining
-                console.log('👥 Second user joining room');
-                state.isInitiator = false;
+                // Second user joining
+                console.log('👥 Second user joining - peer 1 is:', users[0]);
                 state.remoteUserId = users[0];
-
-                // Add current user to room
+                
+                // Add self to room
                 await updateDoc(roomRef, {
                     users: [...users, state.userId]
                 });
@@ -202,22 +193,14 @@ async function joinRoom() {
                 setStatus('Connecting...', false);
                 showLoading(false);
                 
-                // Wait a moment for firestore to sync, then create connection
+                // Create peer connection as initiator (we just joined, so we create the offer)
                 setTimeout(() => {
+                    console.log('⏰ Starting peer connection...');
                     createPeerConnection();
-                }, 500);
-                
-            } else if (users.includes(state.userId)) {
-                // This user already in room
-                console.log('ℹ️ User already in room, waiting for second user');
-                state.isInitiator = true;
-                setStatus('Waiting for connection...', false);
-                showLoading(false);
-                listenForOtherUsers();
+                }, 1000);
 
             } else {
-                // Room full (2+ users)
-                alert('Room is full! Only 2 people can join.');
+                alert('Room is full! Maximum 2 people allowed.');
                 showLoading(false);
                 return;
             }
@@ -235,35 +218,34 @@ async function joinRoom() {
     }
 }
 
-// ============ LISTEN FOR OTHER USERS ============
-function listenForOtherUsers() {
-    console.log('👂 Listening for other users...');
+// ============ LISTEN FOR SECOND USER ============
+function listenForSecondUser() {
+    console.log('👂 Listening for second user...');
     const roomRef = doc(db, 'rooms', state.roomId);
 
     const unsubscribe = onSnapshot(roomRef, async (snapshot) => {
-        if (!snapshot.exists()) {
-            console.log('⚠️ Room deleted');
-            return;
-        }
+        if (!snapshot.exists()) return;
 
         const roomData = snapshot.data();
         const users = roomData.users || [];
-        console.log('📊 Users in room:', users);
+        console.log('📊 Users in room now:', users);
 
         const otherUsers = users.filter(uid => uid !== state.userId);
 
-        // If other user joined and we haven't started connection yet
-        if (otherUsers.length > 0 && !state.peerConnection && !state.connectionInProgress && state.isInitiator) {
-            console.log('🔗 Other user detected, creating peer connection');
+        // If another user joined
+        if (otherUsers.length > 0 && !state.peerConnection) {
+            console.log('🔗 Another user joined! Creating connection...');
             state.remoteUserId = otherUsers[0];
-            state.connectionInProgress = true;
             setStatus('Connecting...', false);
-            await createPeerConnection();
+            
+            setTimeout(() => {
+                createPeerConnection();
+            }, 500);
         }
 
         // If other user left
         if (otherUsers.length === 0 && state.peerConnection) {
-            console.log('👋 Remote user disconnected');
+            console.log('👋 Other user left');
             endCall();
         }
     });
@@ -282,29 +264,39 @@ async function createPeerConnection() {
         console.log('🔨 Creating RTCPeerConnection...');
         state.peerConnection = new RTCPeerConnection({ iceServers: config.iceServers });
 
-        // Add local stream tracks
+        // ===== ADD LOCAL TRACKS =====
+        console.log('📤 Adding local tracks...');
         state.localStream.getTracks().forEach(track => {
-            console.log('📤 Adding local track:', track.kind);
+            console.log('  ├─ Adding:', track.kind);
             state.peerConnection.addTrack(track, state.localStream);
         });
 
-        // Handle remote stream
+        // ===== HANDLE REMOTE TRACKS =====
         state.peerConnection.ontrack = (event) => {
-            console.log('✅ Remote track received:', event.track.kind);
-            if (event.streams && event.streams[0]) {
+            console.log('✅ Remote track event:', event.track.kind);
+            console.log('   Streams:', event.streams.length);
+            
+            if (event.streams && event.streams.length > 0) {
+                console.log('📹 Setting remote stream');
                 state.remoteStream = event.streams[0];
                 remoteVideo.srcObject = state.remoteStream;
+                
+                // Ensure video plays
+                remoteVideo.play().catch(e => console.log('Play error:', e));
+                
+                // Show remote video container
                 remoteVideoContainer.style.display = 'block';
                 placeholder.style.display = 'none';
+                
                 setStatus('Connected', true);
                 startStatsMonitoring();
             }
         };
 
-        // Handle ICE candidates
+        // ===== HANDLE ICE CANDIDATES =====
         state.peerConnection.onicecandidate = async (event) => {
             if (event.candidate) {
-                console.log('🧊 ICE candidate generated, sending...');
+                console.log('🧊 ICE candidate generated');
                 try {
                     await addDoc(collection(db, 'rooms', state.roomId, 'candidates'), {
                         from: state.userId,
@@ -314,75 +306,77 @@ async function createPeerConnection() {
                         sdpMid: event.candidate.sdpMid,
                         timestamp: new Date()
                     });
-                    console.log('✅ ICE candidate sent');
                 } catch (error) {
                     console.error('❌ Error adding ICE candidate:', error);
                 }
             }
         };
 
-        // Handle connection state changes
+        // ===== HANDLE CONNECTION STATE =====
         state.peerConnection.onconnectionstatechange = () => {
             console.log('🔗 Connection state:', state.peerConnection.connectionState);
             if (state.peerConnection.connectionState === 'disconnected' ||
                 state.peerConnection.connectionState === 'failed' ||
                 state.peerConnection.connectionState === 'closed') {
-                console.log('❌ Connection ended');
+                console.log('❌ Connection lost, ending call');
                 endCall();
             }
         };
 
-        if (state.isInitiator) {
-            console.log('📝 Creating offer...');
-            const offer = await state.peerConnection.createOffer({
-                offerToReceiveAudio: true,
-                offerToReceiveVideo: true
-            });
-            
-            await state.peerConnection.setLocalDescription(offer);
-            console.log('✅ Local description set');
+        // ===== CREATE OFFER OR WAIT FOR OFFER =====
+        // Both peers will create offer and listen for answer
+        // First one to listen gets the answer, establishes connection
+        console.log('📝 Creating offer...');
+        const offer = await state.peerConnection.createOffer({
+            offerToReceiveAudio: true,
+            offerToReceiveVideo: true
+        });
 
-            // Send offer to Firestore
-            const offerRef = doc(db, 'rooms', state.roomId, 'offers', state.userId);
-            await setDoc(offerRef, {
-                from: state.userId,
-                to: state.remoteUserId,
-                sdp: offer.sdp,
-                type: 'offer',
-                timestamp: new Date()
-            });
+        console.log('⚙️ Setting local description...');
+        await state.peerConnection.setLocalDescription(offer);
+        state.localDescriptionSet = true;
+        console.log('✅ Local description set');
 
-            console.log('📤 Offer sent to Firestore');
-            listenForAnswer();
-        } else {
-            // Listen for offer
-            console.log('👂 Listening for offer...');
-            listenForOffer();
-        }
+        // Send offer to Firestore
+        const offerRef = doc(db, 'rooms', state.roomId, 'offers', state.userId);
+        await setDoc(offerRef, {
+            from: state.userId,
+            to: state.remoteUserId,
+            sdp: offer.sdp,
+            type: 'offer',
+            timestamp: new Date()
+        });
+        console.log('📤 Offer sent to Firestore');
 
-        // Listen for ICE candidates from remote
-        listenForRemoteCandidates();
+        // Listen for answer
+        listenForAnswer();
+
+        // Also listen for incoming offers (in case other peer also creates offer)
+        listenForOffer();
 
     } catch (error) {
         console.error('❌ Error creating peer connection:', error);
-        state.connectionInProgress = false;
     }
 }
 
 // ============ LISTEN FOR OFFER ============
 function listenForOffer() {
-    console.log('👂 Listening for offers...');
+    console.log('👂 Listening for incoming offers...');
     const offersRef = collection(db, 'rooms', state.roomId, 'offers');
 
     const unsubscribe = onSnapshot(offersRef, async (snapshot) => {
         snapshot.docChanges().forEach(async (change) => {
             if (change.type === 'added') {
                 const offerData = change.doc.data();
-                console.log('📥 Offer data received:', offerData.from);
+                console.log('📥 Offer received from:', offerData.from);
 
-                if (offerData.from === state.remoteUserId && !state.peerConnection.remoteDescription) {
+                // Only process if from remote user and we haven't set remote description yet
+                if (offerData.from === state.remoteUserId && 
+                    state.peerConnection && 
+                    !state.peerConnection.remoteDescription) {
+                    
                     try {
-                        console.log('🎯 Processing offer from:', offerData.from);
+                        console.log('🎯 Processing offer...');
                         const offer = new RTCSessionDescription({
                             type: 'offer',
                             sdp: offerData.sdp
@@ -391,16 +385,17 @@ function listenForOffer() {
                         await state.peerConnection.setRemoteDescription(offer);
                         console.log('✅ Remote description set (offer)');
 
+                        // Create and send answer
                         console.log('📝 Creating answer...');
                         const answer = await state.peerConnection.createAnswer({
                             offerToReceiveAudio: true,
                             offerToReceiveVideo: true
                         });
-                        
+
                         await state.peerConnection.setLocalDescription(answer);
                         console.log('✅ Local description set (answer)');
 
-                        // Send answer to Firestore
+                        // Send answer
                         const answerRef = doc(db, 'rooms', state.roomId, 'answers', state.userId);
                         await setDoc(answerRef, {
                             from: state.userId,
@@ -409,7 +404,6 @@ function listenForOffer() {
                             type: 'answer',
                             timestamp: new Date()
                         });
-
                         console.log('📤 Answer sent to Firestore');
                     } catch (error) {
                         console.error('❌ Error handling offer:', error);
@@ -424,18 +418,22 @@ function listenForOffer() {
 
 // ============ LISTEN FOR ANSWER ============
 function listenForAnswer() {
-    console.log('👂 Listening for answers...');
+    console.log('👂 Listening for incoming answers...');
     const answersRef = collection(db, 'rooms', state.roomId, 'answers');
 
     const unsubscribe = onSnapshot(answersRef, async (snapshot) => {
         snapshot.docChanges().forEach(async (change) => {
             if (change.type === 'added') {
                 const answerData = change.doc.data();
-                console.log('📥 Answer data received:', answerData.from);
+                console.log('📥 Answer received from:', answerData.from);
 
-                if (answerData.from === state.remoteUserId && !state.peerConnection.remoteDescription) {
+                // Only process if from remote user and we haven't set remote description yet
+                if (answerData.from === state.remoteUserId && 
+                    state.peerConnection && 
+                    !state.peerConnection.remoteDescription) {
+                    
                     try {
-                        console.log('🎯 Processing answer from:', answerData.from);
+                        console.log('🎯 Processing answer...');
                         const answer = new RTCSessionDescription({
                             type: 'answer',
                             sdp: answerData.sdp
@@ -464,7 +462,9 @@ function listenForRemoteCandidates() {
             if (change.type === 'added') {
                 const candidateData = change.doc.data();
 
-                if (candidateData.from === state.remoteUserId && candidateData.to === state.userId) {
+                if (candidateData.from === state.remoteUserId && 
+                    candidateData.to === state.userId) {
+                    
                     try {
                         if (state.peerConnection && state.peerConnection.remoteDescription) {
                             console.log('🧊 Adding ICE candidate');
@@ -478,7 +478,9 @@ function listenForRemoteCandidates() {
                             console.log('✅ ICE candidate added');
                         }
                     } catch (error) {
-                        console.error('❌ Error adding ICE candidate:', error);
+                        if (error.message && !error.message.includes('operation not supported')) {
+                            console.error('❌ Error adding ICE candidate:', error);
+                        }
                     }
                 }
             }
@@ -492,6 +494,14 @@ function listenForRemoteCandidates() {
 async function endCall() {
     console.log('🛑 Ending call');
 
+    // Stop listening for candidates when offer/answer are set
+    const answersRef = collection(db, 'rooms', state.roomId, 'answers');
+    onSnapshot(answersRef, () => {
+        if (state.peerConnection && state.peerConnection.remoteDescription) {
+            listenForRemoteCandidates();
+        }
+    }, { onlyOnce: true });
+
     if (state.peerConnection) {
         state.peerConnection.close();
         state.peerConnection = null;
@@ -502,15 +512,14 @@ async function endCall() {
     remoteVideoContainer.style.display = 'none';
     placeholder.style.display = 'flex';
     statsPanel.style.display = 'none';
-    state.connectionInProgress = false;
 
-    // Unsubscribe from all listeners
+    // Unsubscribe from listeners
     if (state.unsubscribeOffers) state.unsubscribeOffers();
     if (state.unsubscribeAnswers) state.unsubscribeAnswers();
     if (state.unsubscribeCandidates) state.unsubscribeCandidates();
     if (state.unsubscribeOtherUsers) state.unsubscribeOtherUsers();
 
-    // Remove user from database
+    // Remove from database
     if (state.roomId && state.userId) {
         try {
             const roomRef = doc(db, 'rooms', state.roomId);
@@ -522,29 +531,25 @@ async function endCall() {
                 const updatedUsers = users.filter(u => u !== state.userId);
 
                 if (updatedUsers.length === 0) {
-                    // Delete room if no users left
                     await deleteDoc(roomRef);
                     console.log('🗑️ Room deleted');
                 } else {
-                    // Update room with remaining users
-                    await updateDoc(roomRef, {
-                        users: updatedUsers
-                    });
+                    await updateDoc(roomRef, { users: updatedUsers });
                 }
             }
 
             // Clean up offers, answers, candidates
             const offersSnap = await getDocs(collection(db, 'rooms', state.roomId, 'offers'));
-            offersSnap.forEach(doc => deleteDoc(doc.ref));
+            offersSnap.forEach(d => deleteDoc(d.ref));
 
             const answersSnap = await getDocs(collection(db, 'rooms', state.roomId, 'answers'));
-            answersSnap.forEach(doc => deleteDoc(doc.ref));
+            answersSnap.forEach(d => deleteDoc(d.ref));
 
             const candidatesSnap = await getDocs(collection(db, 'rooms', state.roomId, 'candidates'));
-            candidatesSnap.forEach(doc => deleteDoc(doc.ref));
+            candidatesSnap.forEach(d => deleteDoc(d.ref));
 
         } catch (error) {
-            console.error('❌ Error cleaning up database:', error);
+            console.error('❌ Error cleaning up:', error);
         }
     }
 
@@ -552,6 +557,7 @@ async function endCall() {
     joinBtn.disabled = false;
     roomIdInput.disabled = false;
     setStatus('Waiting for connection...', false);
+    state.localDescriptionSet = false;
 }
 
 // ============ UI HELPERS ============
@@ -609,4 +615,4 @@ function formatBytes(bytes) {
     return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
 }
 
-console.log('🎥 VideoConnect Firestore Edition loaded');
+console.log('🎥 VideoConnect Firestore Edition - FIXED VERSION loaded');
